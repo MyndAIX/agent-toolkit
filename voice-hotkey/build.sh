@@ -8,7 +8,7 @@ MACOS="$CONTENTS/MacOS"
 
 # Signing identity — use your real Apple Development cert for TCC stability
 # Ad-hoc (codesign --sign -) changes cdhash every build, breaking TCC grants.
-SIGN_IDENTITY="Apple Development: stevenfernandez83@gmail.com (873GX8LX2V)"
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"  # Use env var or ad-hoc signing
 
 echo "=== Building VoiceHotkey ==="
 cd "$SCRIPT_DIR"
@@ -36,5 +36,5 @@ echo "     - Accessibility    → VoiceHotkey.app"
 echo "     - Input Monitoring → VoiceHotkey.app"
 echo "     - Microphone       → VoiceHotkey.app"
 echo "  3. Install LaunchAgent:"
-echo "     cp '$SCRIPT_DIR/com.fieldvision.voicehotkey.plist' ~/Library/LaunchAgents/"
-echo "     launchctl load ~/Library/LaunchAgents/com.fieldvision.voicehotkey.plist"
+echo "     cp '$SCRIPT_DIR/com.voicehotkey.plist' ~/Library/LaunchAgents/"
+echo "     launchctl load ~/Library/LaunchAgents/com.voicehotkey.plist"

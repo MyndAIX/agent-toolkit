@@ -5,51 +5,65 @@ print("🎤 Voice Hotkey Daemon Starting...")
 print("Hold Right Command (⌘) to record, release to transcribe")
 print("Press Ctrl+C to quit")
 
+// State — guarded by isRecording flag
 var recordingProcess: Process?
 var isRecording = false
+var isTranscribing = false
 
-// Use unique file per recording
+// Unique temp file per recording with random suffix
 func audioPath() -> String {
-    "/tmp/voice_ptt_\(Int(Date().timeIntervalSince1970)).wav"
+    let random = String(Int.random(in: 100000...999999))
+    return "/tmp/voice_ptt_\(Int(Date().timeIntervalSince1970))_\(random).wav"
 }
 
 var currentAudioFile = audioPath()
 
-// Monitor Right Command key
-let monitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { event in
-    let flags = event.modifierFlags
-
-    // Right Command: keyCode 0x36 (54). Left Command is 0x37 (55).
-    let isRightCommand = event.keyCode == 0x36
-
-    // Right Command pressed
-    if isRightCommand && flags.contains(.command) && !isRecording {
-        isRecording = true
-        currentAudioFile = audioPath()
-        print("🔴 Recording...")
-
-        recordingProcess = Process()
-        recordingProcess?.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/sox")
-        recordingProcess?.arguments = ["-t", "coreaudio", "default", "-r", "16000", "-c", "1", currentAudioFile]
-
-        do {
-            try recordingProcess?.run()
-        } catch {
-            print("❌ Failed to start recording: \(error)")
-            isRecording = false
-        }
+// Cleanup recording process safely
+func stopRecording() {
+    if let proc = recordingProcess, proc.isRunning {
+        proc.terminate()
     }
-    // Right Command released
-    else if isRightCommand && !flags.contains(.command) && isRecording {
-        isRecording = false
-        print("⏹ Stopped, transcribing...")
+    recordingProcess = nil
+}
 
-        recordingProcess?.terminate()
-        recordingProcess = nil
+// Clean up temp file
+func cleanupAudio(_ path: String) {
+    try? FileManager.default.removeItem(atPath: path)
+}
 
-        let file = currentAudioFile
+// Graceful shutdown
+func shutdown() {
+    stopRecording()
+    cleanupAudio(currentAudioFile)
+    exit(0)
+}
 
-        // Transcribe locally with whisper.cpp
+signal(SIGTERM) { _ in shutdown() }
+signal(SIGINT) { _ in shutdown() }
+
+// Transcribe and paste — runs on background queue
+func transcribeAndPaste(file: String) {
+    guard !isTranscribing else {
+        print("⚠️ Already transcribing, skipping")
+        cleanupAudio(file)
+        return
+    }
+    isTranscribing = true
+
+    DispatchQueue.global(qos: .userInitiated).async {
+        defer {
+            isTranscribing = false
+            cleanupAudio(file)
+        }
+
+        // Verify file exists and has content
+        guard FileManager.default.fileExists(atPath: file),
+              let attrs = try? FileManager.default.attributesOfItem(atPath: file),
+              let size = attrs[.size] as? Int, size > 1000 else {
+            print("❌ Audio file too small or missing — skipped")
+            return
+        }
+
         let transcribe = Process()
         transcribe.executableURL = URL(fileURLWithPath: "/opt/homebrew/opt/whisper-cpp/bin/whisper-cli")
         transcribe.arguments = [
@@ -71,49 +85,93 @@ let monitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { event
             let elapsed = Date().timeIntervalSince(start)
 
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let text = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
             print("⏱ \(String(format: "%.2f", elapsed))s")
 
-            if !text.isEmpty {
-                print("✅ \(text)")
+            guard !text.isEmpty else {
+                print("❌ Empty transcription")
+                return
+            }
 
-                // Copy to clipboard
+            print("✅ \(text)")
+
+            // Clipboard + paste must happen on main thread
+            DispatchQueue.main.async {
                 let pasteboard = NSPasteboard.general
                 pasteboard.clearContents()
                 pasteboard.setString(text, forType: .string)
 
-                // Auto-paste via CGEvent (Cmd+V) — no osascript dependency
-                let src = CGEventSource(stateID: .hidSystemState)
-                let vKeyCode: CGKeyCode = 0x09  // 'v'
-                if let keyDown = CGEvent(keyboardEventSource: src, virtualKey: vKeyCode, keyDown: true),
-                   let keyUp = CGEvent(keyboardEventSource: src, virtualKey: vKeyCode, keyDown: false) {
-                    keyDown.flags = .maskCommand
-                    keyUp.flags = .maskCommand
-                    keyDown.post(tap: .cghidEventTap)
-                    keyUp.post(tap: .cghidEventTap)
+                // Small delay to ensure clipboard is ready
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    let src = CGEventSource(stateID: .hidSystemState)
+                    let vKeyCode: CGKeyCode = 0x09  // 'v'
+                    if let keyDown = CGEvent(keyboardEventSource: src, virtualKey: vKeyCode, keyDown: true),
+                       let keyUp = CGEvent(keyboardEventSource: src, virtualKey: vKeyCode, keyDown: false) {
+                        keyDown.flags = .maskCommand
+                        keyUp.flags = .maskCommand
+                        keyDown.post(tap: .cghidEventTap)
+                        keyUp.post(tap: .cghidEventTap)
+                    }
                 }
-            } else {
-                print("❌ Empty transcription")
             }
         } catch {
             print("❌ Transcription failed: \(error)")
         }
-
-        // Cleanup
-        try? FileManager.default.removeItem(atPath: file)
     }
 }
 
-// Verify TCC granted Input Monitoring — nil means denied
+// Monitor Right Command key
+let monitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { event in
+    let isRightCommand = event.keyCode == 0x36
+    let flags = event.modifierFlags
+
+    // Right Command pressed — start recording
+    if isRightCommand && flags.contains(.command) && !isRecording {
+        // Guard against starting while transcribing
+        guard !isTranscribing else { return }
+
+        isRecording = true
+        currentAudioFile = audioPath()
+        print("🔴 Recording...")
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/sox")
+        proc.arguments = ["-t", "coreaudio", "default", "-r", "16000", "-c", "1", currentAudioFile]
+
+        do {
+            try proc.run()
+            recordingProcess = proc
+        } catch {
+            print("❌ Failed to start recording: \(error)")
+            isRecording = false
+            cleanupAudio(currentAudioFile)
+        }
+    }
+    // Right Command released — stop and transcribe
+    else if isRightCommand && !flags.contains(.command) && isRecording {
+        isRecording = false
+        print("⏹ Stopped, transcribing...")
+
+        stopRecording()
+
+        // Brief delay for sox to flush the file
+        let file = currentAudioFile
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            transcribeAndPaste(file: file)
+        }
+    }
+}
+
+// Verify TCC granted Input Monitoring
 if monitor == nil {
     print("❌ FATAL: Input monitoring denied by macOS.")
     print("   Grant in: System Settings > Privacy & Security > Input Monitoring → VoiceHotkey.app")
     print("   If already granted, reset with: tccutil reset InputMonitoring")
-    exit(1)  // KeepAlive/SuccessfulExit:false will restart after you grant permission
+    exit(1)
 }
 
 print("✅ Input monitoring active. Listening for Right Command key...")
 
-// Keep running
 RunLoop.main.run()
