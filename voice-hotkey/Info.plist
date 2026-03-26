@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.fieldvision.voicehotkey</string>
+    <key>CFBundleExecutable</key>
+    <string>VoiceHotkey</string>
+    <key>CFBundleName</key>
+    <string>VoiceHotkey</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSBackgroundOnly</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>VoiceHotkey records audio for voice-to-text transcription.</string>
+</dict>
+</plist>
